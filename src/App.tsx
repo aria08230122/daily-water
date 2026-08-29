@@ -14,6 +14,7 @@ import {
   Pencil,
   Plus,
   Settings2,
+  Smartphone,
   Sparkles,
   Trash2,
   Undo2,
@@ -31,6 +32,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
 import {
   RadioGroup,
   RadioGroupItem,
@@ -45,7 +47,7 @@ import {
 } from "@/components/ui/sheet";
 import { Toaster } from "@/components/ui/sonner";
 
-type ThemeId = "cream" | "blue" | "sage" | "berry";
+type ThemeId = "cream" | "blue" | "sage" | "berry" | "custom";
 
 type WaterEntry = {
   id: string;
@@ -56,6 +58,7 @@ type WaterEntry = {
 type WaterStore = {
   version: 1;
   theme: ThemeId;
+  customColor: string;
   dailyGoalMl: number;
   quickAmountsMl: number[];
   entries: WaterEntry[];
@@ -86,13 +89,18 @@ const STORAGE_KEY = "daily-water/store-v1";
 const DEFAULT_STORE: WaterStore = {
   version: 1,
   theme: "cream",
+  customColor: "#89A7A2",
   dailyGoalMl: 2000,
   quickAmountsMl: [250, 350, 500],
   entries: [],
 };
 
 function isThemeId(value: unknown): value is ThemeId {
-  return THEMES.some((theme) => theme.id === value);
+  return value === "custom" || THEMES.some((theme) => theme.id === value);
+}
+
+function isHexColor(value: unknown): value is string {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
 }
 
 function normalizeWaterStore(value: unknown): WaterStore | null {
@@ -125,6 +133,9 @@ function normalizeWaterStore(value: unknown): WaterStore | null {
   return {
     version: 1,
     theme: isThemeId(parsed.theme) ? parsed.theme : DEFAULT_STORE.theme,
+    customColor: isHexColor(parsed.customColor)
+      ? parsed.customColor.toUpperCase()
+      : DEFAULT_STORE.customColor,
     dailyGoalMl:
       typeof parsed.dailyGoalMl === "number" &&
       Number.isFinite(parsed.dailyGoalMl) &&
@@ -245,6 +256,11 @@ function createEntry(amountMl: number, drankAt = new Date()): WaterEntry {
   };
 }
 
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
+
 export default function Home() {
   const [store, setStore] = useState<WaterStore>(DEFAULT_STORE);
   const [customAmount, setCustomAmount] = useState("");
@@ -258,13 +274,18 @@ export default function Home() {
     "350",
     "500",
   ]);
+  const [customColorDraft, setCustomColorDraft] = useState(
+    DEFAULT_STORE.customColor,
+  );
   const [selectedDayKey, setSelectedDayKey] = useState("");
   const [calendarCursor, setCalendarCursor] = useState<Date | null>(null);
   const [isEntryDialogOpen, setIsEntryDialogOpen] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [entryAmountDraft, setEntryAmountDraft] = useState("");
   const [entryTimeDraft, setEntryTimeDraft] = useState("");
-  const [pourVersion, setPourVersion] = useState(0);
+  const [installPrompt, setInstallPrompt] =
+    useState<InstallPromptEvent | null>(null);
+  const [isStandalone, setIsStandalone] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -281,6 +302,64 @@ export default function Home() {
   useEffect(() => {
     if (isReady) localWaterRepository.save(store);
   }, [isReady, store]);
+
+  useEffect(() => {
+    const standaloneNavigator = navigator as Navigator & {
+      standalone?: boolean;
+    };
+    setIsStandalone(
+      window.matchMedia("(display-mode: standalone)").matches ||
+        Boolean(standaloneNavigator.standalone),
+    );
+
+    const handleInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    const handleInstalled = () => {
+      setInstallPrompt(null);
+      setIsStandalone(true);
+      toast.success("喝水小记已安装到桌面");
+    };
+
+    window.addEventListener("beforeinstallprompt", handleInstallPrompt);
+    window.addEventListener("appinstalled", handleInstalled);
+
+    const registerServiceWorker = () => {
+      if (!("serviceWorker" in navigator)) return;
+      const serviceWorkerUrl = new URL("sw.js", document.baseURI);
+      const scope = new URL("./", document.baseURI).pathname;
+      void navigator.serviceWorker.register(serviceWorkerUrl, { scope });
+    };
+
+    if (document.readyState === "complete") {
+      registerServiceWorker();
+    } else {
+      window.addEventListener("load", registerServiceWorker, { once: true });
+    }
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleInstallPrompt);
+      window.removeEventListener("appinstalled", handleInstalled);
+      window.removeEventListener("load", registerServiceWorker);
+    };
+  }, []);
+
+  useEffect(() => {
+    const themeColors: Record<Exclude<ThemeId, "custom">, string> = {
+      cream: "#F6F0E7",
+      blue: "#EEF2F3",
+      sage: "#F0F2EB",
+      berry: "#F5EDEF",
+    };
+    const color =
+      store.theme === "custom"
+        ? store.customColor
+        : themeColors[store.theme];
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", color);
+  }, [store.customColor, store.theme]);
 
   const todayKey = now ? localDayKey(now) : "";
   const todayEntries = useMemo(
@@ -354,8 +433,11 @@ export default function Home() {
           weekday: "short",
         }).format(dateFromDayKey(selectedDayKey))
     : "今天";
-  const glassStyle = {
-    "--water-level": `${progress}%`,
+  const gaugeStyle = {
+    "--progress": `${progress}%`,
+  } as CSSProperties;
+  const customThemeStyle = {
+    "--custom-color": store.customColor,
   } as CSSProperties;
 
   function selectTheme(value: string) {
@@ -366,6 +448,7 @@ export default function Home() {
   function handleSettingsOpenChange(open: boolean) {
     if (open) {
       setGoalDraft(String(store.dailyGoalMl));
+      setCustomColorDraft(store.customColor);
       setQuickAmountDrafts(
         Array.from({ length: 3 }, (_, index) =>
           String(
@@ -407,6 +490,40 @@ export default function Home() {
     toast.success("饮水目标与快捷容量已保存");
   }
 
+  function applyCustomTheme(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!isHexColor(customColorDraft)) {
+      toast.error("请输入完整的十六进制颜色，例如 #89A7A2");
+      return;
+    }
+
+    const color = customColorDraft.toUpperCase();
+    setCustomColorDraft(color);
+    setStore((current) => ({
+      ...current,
+      theme: "custom",
+      customColor: color,
+    }));
+    toast.success("自定义配色已应用");
+  }
+
+  async function installApp() {
+    if (isStandalone) {
+      toast("喝水小记已经安装好了");
+      return;
+    }
+    if (!installPrompt) {
+      toast("请打开浏览器菜单，选择“添加到主屏幕”或“安装应用”");
+      return;
+    }
+
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (choice.outcome === "accepted") {
+      setInstallPrompt(null);
+    }
+  }
+
   function addWater(amountMl: number) {
     if (!Number.isFinite(amountMl) || amountMl < 1 || amountMl > 5000) {
       toast.error("请输入 1–5000 ml 之间的水量");
@@ -421,7 +538,6 @@ export default function Home() {
     setLastAddedId(entry.id);
     setCustomAmount("");
     setNow(new Date());
-    setPourVersion((current) => current + 1);
     toast.success(`记下 ${entry.amountMl} ml`, {
       action: {
         label: "撤销",
@@ -542,9 +658,6 @@ export default function Home() {
     );
     setNow(new Date());
     setIsEntryDialogOpen(false);
-    if (!editingEntryId && savedDayKey === todayKey) {
-      setPourVersion((current) => current + 1);
-    }
     toast.success(editingEntryId ? "记录已更新" : "补记成功");
   }
 
@@ -614,7 +727,11 @@ export default function Home() {
   }
 
   return (
-    <main className="water-app" data-theme={store.theme}>
+    <main
+      className="water-app"
+      data-theme={store.theme}
+      style={customThemeStyle}
+    >
       <div className="ambient ambient-one" aria-hidden="true" />
       <div className="ambient ambient-two" aria-hidden="true" />
 
@@ -655,6 +772,7 @@ export default function Home() {
                 side="right"
                 className="settings-sheet"
                 data-theme={store.theme}
+                style={customThemeStyle}
               >
                 <SheetHeader className="settings-header">
                   <SheetTitle>设置</SheetTitle>
@@ -769,7 +887,83 @@ export default function Home() {
                           </label>
                         </div>
                       ))}
+                      <div className="theme-option">
+                        <RadioGroupItem
+                          id="theme-custom"
+                          value="custom"
+                          className="theme-radio"
+                        />
+                        <label
+                          className="theme-choice"
+                          htmlFor="theme-custom"
+                        >
+                          <span
+                            className="theme-swatch swatch-custom"
+                            aria-hidden="true"
+                          />
+                          <span>自定义</span>
+                        </label>
+                      </div>
                     </RadioGroup>
+                    {store.theme === "custom" ? (
+                      <form
+                        className="custom-theme-editor"
+                        onSubmit={applyCustomTheme}
+                      >
+                        <label htmlFor="custom-theme-color">自定义主色</label>
+                        <div className="custom-color-controls">
+                          <input
+                            id="custom-theme-color"
+                            type="color"
+                            value={customColorDraft}
+                            onChange={(event) => {
+                              const color = event.target.value.toUpperCase();
+                              setCustomColorDraft(color);
+                              setStore((current) => ({
+                                ...current,
+                                theme: "custom",
+                                customColor: color,
+                              }));
+                            }}
+                            aria-label="选择自定义主色"
+                          />
+                          <Input
+                            value={customColorDraft}
+                            onChange={(event) =>
+                              setCustomColorDraft(event.target.value)
+                            }
+                            maxLength={7}
+                            spellCheck={false}
+                            aria-label="输入十六进制颜色"
+                            className="custom-color-input"
+                          />
+                          <Button type="submit">应用</Button>
+                        </div>
+                        <p>页面会自动生成柔和的背景、按钮和强调色。</p>
+                      </form>
+                    ) : null}
+                  </section>
+
+                  <section
+                    className="settings-section"
+                    aria-labelledby="install-heading"
+                  >
+                    <div className="settings-section-title">
+                      <Smartphone aria-hidden="true" />
+                      <div>
+                        <h2 id="install-heading">安装到手机</h2>
+                        <p>像普通应用一样打开，也支持离线使用</p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="install-button"
+                      onClick={installApp}
+                    >
+                      <Smartphone aria-hidden="true" />
+                      {isStandalone ? "已经安装" : "安装喝水小记"}
+                    </Button>
                   </section>
 
                   <section
@@ -832,60 +1026,27 @@ export default function Home() {
 
             <div className="progress-zone">
               <div
-                className={`glass-stage${progress >= 100 ? " is-full" : ""}`}
+                className="progress-gauge"
+                style={gaugeStyle}
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={store.dailyGoalMl}
+                aria-valuenow={Math.min(todayTotal, store.dailyGoalMl)}
+                aria-label={`今日已饮水 ${todayTotal} 毫升，目标 ${store.dailyGoalMl} 毫升，完成 ${progress}%`}
               >
-                <div
-                  key={pourVersion}
-                  className={`pour-animation${pourVersion ? " is-active" : ""}`}
-                  aria-hidden="true"
-                >
-                  <span className="pour-vessel">
+                <div className="gauge-inner">
+                  <span className="gauge-icon" aria-hidden="true">
                     <GlassWater />
                   </span>
-                  <span className="pour-stream" />
+                  <strong>{todayTotal.toLocaleString("zh-CN")}</strong>
+                  <span>/ {store.dailyGoalMl.toLocaleString("zh-CN")} ml</span>
                 </div>
-
-                <div
-                  className="hydration-glass"
-                  style={glassStyle}
-                  role="progressbar"
-                  aria-valuemin={0}
-                  aria-valuemax={store.dailyGoalMl}
-                  aria-valuenow={Math.min(todayTotal, store.dailyGoalMl)}
-                  aria-label={`今日已饮水 ${todayTotal} 毫升，目标 ${store.dailyGoalMl} 毫升，完成 ${progress}%`}
-                >
-                  <div className="glass-water" aria-hidden="true">
-                    <span className="water-surface" />
-                    <span className="water-bubble bubble-one" />
-                    <span className="water-bubble bubble-two" />
-                    <span className="water-bubble bubble-three" />
-                  </div>
-                  <span className="glass-shine" aria-hidden="true" />
-                  <div className="glass-scale" aria-hidden="true">
-                    {[1, 0.75, 0.5, 0.25].map((ratio) => (
-                      <span key={ratio}>
-                        <i />
-                        {Math.round(store.dailyGoalMl * ratio)}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="glass-reading">
-                    <strong>{todayTotal.toLocaleString("zh-CN")}</strong>
-                    <span>
-                      / {store.dailyGoalMl.toLocaleString("zh-CN")} ml
-                    </span>
-                  </div>
-                </div>
-
-                <span className="full-sparkle" aria-hidden="true">
-                  <Sparkles />
-                </span>
               </div>
 
               <div className="progress-copy">
                 <span className="sparkle-chip">
                   <Sparkles aria-hidden="true" />
-                  {progress}% · 今日进度
+                  今日进度
                 </span>
                 <strong>
                   {remaining > 0
@@ -899,6 +1060,11 @@ export default function Home() {
                     ? "慢慢喝，每一杯都算数。"
                     : "做得很好，继续保持舒服的节奏。"}
                 </p>
+                <Progress
+                  value={progress}
+                  className="soft-progress"
+                  aria-label={`今日饮水进度 ${progress}%`}
+                />
               </div>
             </div>
 
@@ -1178,6 +1344,7 @@ export default function Home() {
         <DialogContent
           className="entry-dialog"
           data-theme={store.theme}
+          style={customThemeStyle}
         >
           <DialogHeader>
             <DialogTitle>

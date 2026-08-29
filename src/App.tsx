@@ -1,17 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { CSSProperties, FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, CSSProperties, FormEvent } from "react";
 import {
   CalendarDays,
   Clock3,
+  Download,
   Droplets,
   GlassWater,
   Palette,
   Plus,
+  Settings2,
   Sparkles,
   Trash2,
   Undo2,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -22,6 +25,14 @@ import {
   RadioGroup,
   RadioGroupItem,
 } from "@/components/ui/radio-group";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 import { Toaster } from "@/components/ui/sonner";
 
 type ThemeId = "cream" | "blue" | "sage" | "berry";
@@ -66,6 +77,49 @@ function isThemeId(value: unknown): value is ThemeId {
   return THEMES.some((theme) => theme.id === value);
 }
 
+function normalizeWaterStore(value: unknown): WaterStore | null {
+  if (!value || typeof value !== "object") return null;
+
+  const parsed = value as Partial<WaterStore>;
+  if (parsed.version !== 1 || !Array.isArray(parsed.entries)) return null;
+
+  const entries = parsed.entries.filter(
+    (entry): entry is WaterEntry =>
+      typeof entry?.id === "string" &&
+      typeof entry?.amountMl === "number" &&
+      Number.isFinite(entry.amountMl) &&
+      entry.amountMl > 0 &&
+      entry.amountMl <= 5000 &&
+      typeof entry?.drankAt === "string" &&
+      !Number.isNaN(Date.parse(entry.drankAt)),
+  );
+
+  const quickAmounts = Array.isArray(parsed.quickAmountsMl)
+    ? parsed.quickAmountsMl.filter(
+        (amount): amount is number =>
+          typeof amount === "number" &&
+          Number.isFinite(amount) &&
+          amount > 0 &&
+          amount <= 5000,
+      )
+    : [];
+
+  return {
+    version: 1,
+    theme: isThemeId(parsed.theme) ? parsed.theme : DEFAULT_STORE.theme,
+    dailyGoalMl:
+      typeof parsed.dailyGoalMl === "number" &&
+      Number.isFinite(parsed.dailyGoalMl) &&
+      parsed.dailyGoalMl > 0
+        ? parsed.dailyGoalMl
+        : DEFAULT_STORE.dailyGoalMl,
+    quickAmountsMl: quickAmounts.length
+      ? quickAmounts
+      : DEFAULT_STORE.quickAmountsMl,
+    entries,
+  };
+}
+
 // Persistence stays behind a small adapter so a cloud sync repository can be
 // added later without rewriting the page or the data model.
 const localWaterRepository = {
@@ -74,33 +128,7 @@ const localWaterRepository = {
     if (!raw) return null;
 
     try {
-      const parsed = JSON.parse(raw) as Partial<WaterStore>;
-      if (parsed.version !== 1 || !Array.isArray(parsed.entries)) return null;
-
-      const entries = parsed.entries.filter(
-        (entry): entry is WaterEntry =>
-          typeof entry?.id === "string" &&
-          typeof entry?.amountMl === "number" &&
-          entry.amountMl > 0 &&
-          typeof entry?.drankAt === "string",
-      );
-
-      return {
-        version: 1,
-        theme: isThemeId(parsed.theme) ? parsed.theme : DEFAULT_STORE.theme,
-        dailyGoalMl:
-          typeof parsed.dailyGoalMl === "number" && parsed.dailyGoalMl > 0
-            ? parsed.dailyGoalMl
-            : DEFAULT_STORE.dailyGoalMl,
-        quickAmountsMl:
-          Array.isArray(parsed.quickAmountsMl) && parsed.quickAmountsMl.length
-            ? parsed.quickAmountsMl.filter(
-                (amount): amount is number =>
-                  typeof amount === "number" && amount > 0,
-              )
-            : DEFAULT_STORE.quickAmountsMl,
-        entries,
-      };
+      return normalizeWaterStore(JSON.parse(raw));
     } catch {
       return null;
     }
@@ -156,6 +184,8 @@ export default function Home() {
   const [lastAddedId, setLastAddedId] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
   const [isReady, setIsReady] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setStore(localWaterRepository.load() ?? DEFAULT_STORE);
@@ -268,6 +298,66 @@ export default function Home() {
     addWater(Number(customAmount));
   }
 
+  function exportData() {
+    const payload = {
+      app: "daily-water",
+      exportVersion: 1,
+      exportedAt: new Date().toISOString(),
+      data: store,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `喝水小记-${localDayKey(new Date())}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast.success(`已导出 ${store.entries.length} 条记录`);
+  }
+
+  async function importData(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("文件过大，请选择 5 MB 以内的备份文件");
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const candidate =
+        parsed &&
+        typeof parsed === "object" &&
+        "app" in parsed &&
+        (parsed as { app?: unknown }).app === "daily-water" &&
+        "data" in parsed
+          ? (parsed as { data: unknown }).data
+          : parsed;
+      const importedStore = normalizeWaterStore(candidate);
+
+      if (!importedStore) {
+        toast.error("这不是有效的喝水小记备份文件");
+        return;
+      }
+
+      localWaterRepository.save(importedStore);
+      setStore(importedStore);
+      setLastAddedId(null);
+      setCustomAmount("");
+      setNow(new Date());
+      setIsSettingsOpen(false);
+      toast.success(`已导入 ${importedStore.entries.length} 条记录`);
+    } catch {
+      toast.error("文件无法读取，请确认它是 JSON 备份文件");
+    }
+  }
+
   const gaugeStyle = { "--progress": `${progress}%` } as CSSProperties;
 
   return (
@@ -286,41 +376,125 @@ export default function Home() {
               <h1>喝水小记</h1>
             </div>
           </div>
-          <div className="date-pill">
-            <CalendarDays aria-hidden="true" />
-            <span>{dateLabel}</span>
+          <div className="header-actions">
+            <div className="date-pill">
+              <CalendarDays aria-hidden="true" />
+              <span>{dateLabel}</span>
+            </div>
+
+            <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+              <SheetTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="settings-trigger"
+                  aria-label="打开设置"
+                  title="设置"
+                >
+                  <Settings2 aria-hidden="true" />
+                </Button>
+              </SheetTrigger>
+              <SheetContent
+                side="right"
+                className="settings-sheet"
+                data-theme={store.theme}
+              >
+                <SheetHeader className="settings-header">
+                  <SheetTitle>设置</SheetTitle>
+                  <SheetDescription>
+                    切换页面配色，备份或恢复你的饮水记录。
+                  </SheetDescription>
+                </SheetHeader>
+
+                <div className="settings-body">
+                  <section
+                    className="settings-section"
+                    aria-labelledby="theme-heading"
+                  >
+                    <div className="settings-section-title">
+                      <Palette aria-hidden="true" />
+                      <div>
+                        <h2 id="theme-heading">外观配色</h2>
+                        <p>选择一种你今天喜欢的颜色</p>
+                      </div>
+                    </div>
+                    <RadioGroup
+                      value={store.theme}
+                      onValueChange={selectTheme}
+                      className="theme-radio-group"
+                      aria-label="选择页面配色"
+                    >
+                      {THEMES.map((theme) => (
+                        <div className="theme-option" key={theme.id}>
+                          <RadioGroupItem
+                            id={`theme-${theme.id}`}
+                            value={theme.id}
+                            className="theme-radio"
+                          />
+                          <label
+                            className="theme-choice"
+                            htmlFor={`theme-${theme.id}`}
+                          >
+                            <span
+                              className={`theme-swatch swatch-${theme.id}`}
+                              aria-hidden="true"
+                            />
+                            <span>{theme.name}</span>
+                          </label>
+                        </div>
+                      ))}
+                    </RadioGroup>
+                  </section>
+
+                  <section
+                    className="settings-section"
+                    aria-labelledby="data-heading"
+                  >
+                    <div className="settings-section-title">
+                      <Download aria-hidden="true" />
+                      <div>
+                        <h2 id="data-heading">数据备份</h2>
+                        <p>当前共有 {store.entries.length} 条饮水记录</p>
+                      </div>
+                    </div>
+                    <div className="data-actions">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="data-button"
+                        onClick={exportData}
+                      >
+                        <Download aria-hidden="true" />
+                        导出数据
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="data-button"
+                        onClick={() => importInputRef.current?.click()}
+                      >
+                        <Upload aria-hidden="true" />
+                        导入数据
+                      </Button>
+                      <input
+                        ref={importInputRef}
+                        className="settings-file-input"
+                        type="file"
+                        accept="application/json,.json"
+                        onChange={importData}
+                        aria-label="选择喝水小记备份文件"
+                      />
+                    </div>
+                    <p className="import-note">
+                      导入后会替换当前浏览器中的记录与配色设置。
+                    </p>
+                  </section>
+                </div>
+              </SheetContent>
+            </Sheet>
           </div>
         </header>
-
-        <section className="theme-bar" aria-labelledby="theme-heading">
-          <div className="theme-title">
-            <Palette aria-hidden="true" />
-            <span id="theme-heading">今天想用哪种颜色？</span>
-          </div>
-          <RadioGroup
-            value={store.theme}
-            onValueChange={selectTheme}
-            className="theme-radio-group"
-            aria-label="选择页面配色"
-          >
-            {THEMES.map((theme) => (
-              <div className="theme-option" key={theme.id}>
-                <RadioGroupItem
-                  id={`theme-${theme.id}`}
-                  value={theme.id}
-                  className="theme-radio"
-                />
-                <label className="theme-choice" htmlFor={`theme-${theme.id}`}>
-                  <span
-                    className={`theme-swatch swatch-${theme.id}`}
-                    aria-hidden="true"
-                  />
-                  <span>{theme.name}</span>
-                </label>
-              </div>
-            ))}
-          </RadioGroup>
-        </section>
 
         <div className="dashboard-grid">
           <section className="primary-card" aria-labelledby="today-heading">

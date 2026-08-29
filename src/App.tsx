@@ -4,11 +4,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties, FormEvent } from "react";
 import {
   CalendarDays,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Download,
   Droplets,
   GlassWater,
   Palette,
+  Pencil,
   Plus,
   Settings2,
   Sparkles,
@@ -19,8 +22,15 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import {
   RadioGroup,
   RadioGroupItem,
@@ -54,6 +64,14 @@ type WaterStore = {
 type DaySummary = {
   key: string;
   label: string;
+  totalMl: number;
+};
+
+type CalendarDay = {
+  key: string;
+  date: Date;
+  dayNumber: number;
+  isCurrentMonth: boolean;
   totalMl: number;
 };
 
@@ -145,6 +163,20 @@ function localDayKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
+function dateFromDayKey(key: string) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year, month - 1, day, 12, 0, 0, 0);
+}
+
+function dateTimeInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
 function buildWeek(now: Date, entries: WaterEntry[]): DaySummary[] {
   return Array.from({ length: 7 }, (_, index) => {
     const date = new Date(now);
@@ -167,14 +199,49 @@ function buildWeek(now: Date, entries: WaterEntry[]): DaySummary[] {
   });
 }
 
-function createEntry(amountMl: number): WaterEntry {
+function buildMonth(
+  cursor: Date,
+  entries: WaterEntry[],
+): CalendarDay[] {
+  const firstDay = new Date(
+    cursor.getFullYear(),
+    cursor.getMonth(),
+    1,
+    12,
+  );
+  const mondayOffset = (firstDay.getDay() + 6) % 7;
+  const gridStart = new Date(firstDay);
+  gridStart.setDate(firstDay.getDate() - mondayOffset);
+
+  const totals = new Map<string, number>();
+  entries.forEach((entry) => {
+    const key = localDayKey(new Date(entry.drankAt));
+    totals.set(key, (totals.get(key) ?? 0) + entry.amountMl);
+  });
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    const key = localDayKey(date);
+
+    return {
+      key,
+      date,
+      dayNumber: date.getDate(),
+      isCurrentMonth: date.getMonth() === cursor.getMonth(),
+      totalMl: totals.get(key) ?? 0,
+    };
+  });
+}
+
+function createEntry(amountMl: number, drankAt = new Date()): WaterEntry {
   return {
     id:
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     amountMl,
-    drankAt: new Date().toISOString(),
+    drankAt: drankAt.toISOString(),
   };
 }
 
@@ -185,11 +252,29 @@ export default function Home() {
   const [now, setNow] = useState<Date | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [goalDraft, setGoalDraft] = useState("2000");
+  const [quickAmountDrafts, setQuickAmountDrafts] = useState([
+    "250",
+    "350",
+    "500",
+  ]);
+  const [selectedDayKey, setSelectedDayKey] = useState("");
+  const [calendarCursor, setCalendarCursor] = useState<Date | null>(null);
+  const [isEntryDialogOpen, setIsEntryDialogOpen] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+  const [entryAmountDraft, setEntryAmountDraft] = useState("");
+  const [entryTimeDraft, setEntryTimeDraft] = useState("");
+  const [pourVersion, setPourVersion] = useState(0);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    const currentDate = new Date();
     setStore(localWaterRepository.load() ?? DEFAULT_STORE);
-    setNow(new Date());
+    setNow(currentDate);
+    setSelectedDayKey(localDayKey(currentDate));
+    setCalendarCursor(
+      new Date(currentDate.getFullYear(), currentDate.getMonth(), 1, 12),
+    );
     setIsReady(true);
   }, []);
 
@@ -211,6 +296,20 @@ export default function Home() {
         ),
     [store.entries, todayKey],
   );
+  const selectedEntries = useMemo(
+    () =>
+      store.entries
+        .filter(
+          (entry) =>
+            selectedDayKey &&
+            localDayKey(new Date(entry.drankAt)) === selectedDayKey,
+        )
+        .sort(
+          (a, b) =>
+            new Date(b.drankAt).getTime() - new Date(a.drankAt).getTime(),
+        ),
+    [selectedDayKey, store.entries],
+  );
   const todayTotal = todayEntries.reduce(
     (sum, entry) => sum + entry.amountMl,
     0,
@@ -220,9 +319,18 @@ export default function Home() {
     Math.round((todayTotal / store.dailyGoalMl) * 100),
   );
   const remaining = Math.max(0, store.dailyGoalMl - todayTotal);
+  const overGoal = Math.max(0, todayTotal - store.dailyGoalMl);
   const week = useMemo(
     () => buildWeek(now ?? new Date(2026, 0, 1), store.entries),
     [now, store.entries],
+  );
+  const monthDays = useMemo(
+    () =>
+      buildMonth(
+        calendarCursor ?? new Date(2026, 0, 1),
+        store.entries,
+      ),
+    [calendarCursor, store.entries],
   );
   const dateLabel = now
     ? new Intl.DateTimeFormat("zh-CN", {
@@ -231,10 +339,72 @@ export default function Home() {
         weekday: "short",
       }).format(now)
     : "今天";
+  const monthLabel = calendarCursor
+    ? new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "long",
+      }).format(calendarCursor)
+    : "本月";
+  const selectedDateLabel = selectedDayKey
+    ? selectedDayKey === todayKey
+      ? "今天"
+      : new Intl.DateTimeFormat("zh-CN", {
+          month: "long",
+          day: "numeric",
+          weekday: "short",
+        }).format(dateFromDayKey(selectedDayKey))
+    : "今天";
+  const glassStyle = {
+    "--water-level": `${progress}%`,
+  } as CSSProperties;
 
   function selectTheme(value: string) {
     if (!isThemeId(value)) return;
     setStore((current) => ({ ...current, theme: value }));
+  }
+
+  function handleSettingsOpenChange(open: boolean) {
+    if (open) {
+      setGoalDraft(String(store.dailyGoalMl));
+      setQuickAmountDrafts(
+        Array.from({ length: 3 }, (_, index) =>
+          String(
+            store.quickAmountsMl[index] ??
+              DEFAULT_STORE.quickAmountsMl[index],
+          ),
+        ),
+      );
+    }
+    setIsSettingsOpen(open);
+  }
+
+  function savePreferences(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const goal = Math.round(Number(goalDraft));
+    const quickAmounts = quickAmountDrafts.map((value) =>
+      Math.round(Number(value)),
+    );
+
+    if (!Number.isFinite(goal) || goal < 250 || goal > 10000) {
+      toast.error("每日目标请输入 250–10000 ml");
+      return;
+    }
+    if (
+      quickAmounts.some(
+        (amount) =>
+          !Number.isFinite(amount) || amount < 1 || amount > 5000,
+      )
+    ) {
+      toast.error("快捷容量请输入 1–5000 ml");
+      return;
+    }
+
+    setStore((current) => ({
+      ...current,
+      dailyGoalMl: goal,
+      quickAmountsMl: quickAmounts,
+    }));
+    toast.success("饮水目标与快捷容量已保存");
   }
 
   function addWater(amountMl: number) {
@@ -251,6 +421,7 @@ export default function Home() {
     setLastAddedId(entry.id);
     setCustomAmount("");
     setNow(new Date());
+    setPourVersion((current) => current + 1);
     toast.success(`记下 ${entry.amountMl} ml`, {
       action: {
         label: "撤销",
@@ -296,6 +467,85 @@ export default function Home() {
   function handleCustomSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     addWater(Number(customAmount));
+  }
+
+  function changeMonth(offset: number) {
+    setCalendarCursor((current) => {
+      const base = current ?? now ?? new Date();
+      return new Date(base.getFullYear(), base.getMonth() + offset, 1, 12);
+    });
+  }
+
+  function selectCalendarDay(day: CalendarDay) {
+    setSelectedDayKey(day.key);
+    if (!day.isCurrentMonth) {
+      setCalendarCursor(
+        new Date(day.date.getFullYear(), day.date.getMonth(), 1, 12),
+      );
+    }
+  }
+
+  function openAddEntry() {
+    const key = selectedDayKey || todayKey || localDayKey(new Date());
+    const selectedDate = dateFromDayKey(key);
+    const entryDate = key === todayKey ? new Date() : selectedDate;
+    setEditingEntryId(null);
+    setEntryAmountDraft("");
+    setEntryTimeDraft(dateTimeInputValue(entryDate));
+    setIsEntryDialogOpen(true);
+  }
+
+  function openEditEntry(entry: WaterEntry) {
+    setEditingEntryId(entry.id);
+    setEntryAmountDraft(String(entry.amountMl));
+    setEntryTimeDraft(dateTimeInputValue(new Date(entry.drankAt)));
+    setIsEntryDialogOpen(true);
+  }
+
+  function saveEntry(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const amount = Math.round(Number(entryAmountDraft));
+    const drankAt = new Date(entryTimeDraft);
+
+    if (!Number.isFinite(amount) || amount < 1 || amount > 5000) {
+      toast.error("请输入 1–5000 ml 之间的水量");
+      return;
+    }
+    if (Number.isNaN(drankAt.getTime())) {
+      toast.error("请选择有效的饮水时间");
+      return;
+    }
+    if (drankAt.getTime() > Date.now() + 60_000) {
+      toast.error("饮水时间不能晚于现在");
+      return;
+    }
+
+    const nextEntry = editingEntryId
+      ? null
+      : createEntry(amount, drankAt);
+
+    setStore((current) => ({
+      ...current,
+      entries: editingEntryId
+        ? current.entries.map((entry) =>
+            entry.id === editingEntryId
+              ? { ...entry, amountMl: amount, drankAt: drankAt.toISOString() }
+              : entry,
+          )
+        : [...current.entries, nextEntry as WaterEntry],
+    }));
+
+    const savedDayKey = localDayKey(drankAt);
+    setSelectedDayKey(savedDayKey);
+    setCalendarCursor(
+      new Date(drankAt.getFullYear(), drankAt.getMonth(), 1, 12),
+    );
+    setNow(new Date());
+    setIsEntryDialogOpen(false);
+    if (!editingEntryId && savedDayKey === todayKey) {
+      setPourVersion((current) => current + 1);
+    }
+    toast.success(editingEntryId ? "记录已更新" : "补记成功");
   }
 
   function exportData() {
@@ -350,15 +600,18 @@ export default function Home() {
       setStore(importedStore);
       setLastAddedId(null);
       setCustomAmount("");
-      setNow(new Date());
+      const currentDate = new Date();
+      setNow(currentDate);
+      setSelectedDayKey(localDayKey(currentDate));
+      setCalendarCursor(
+        new Date(currentDate.getFullYear(), currentDate.getMonth(), 1, 12),
+      );
       setIsSettingsOpen(false);
       toast.success(`已导入 ${importedStore.entries.length} 条记录`);
     } catch {
       toast.error("文件无法读取，请确认它是 JSON 备份文件");
     }
   }
-
-  const gaugeStyle = { "--progress": `${progress}%` } as CSSProperties;
 
   return (
     <main className="water-app" data-theme={store.theme}>
@@ -382,7 +635,10 @@ export default function Home() {
               <span>{dateLabel}</span>
             </div>
 
-            <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+            <Sheet
+              open={isSettingsOpen}
+              onOpenChange={handleSettingsOpenChange}
+            >
               <SheetTrigger asChild>
                 <Button
                   type="button"
@@ -403,11 +659,80 @@ export default function Home() {
                 <SheetHeader className="settings-header">
                   <SheetTitle>设置</SheetTitle>
                   <SheetDescription>
-                    切换页面配色，备份或恢复你的饮水记录。
+                    调整饮水习惯、页面配色与本地数据。
                   </SheetDescription>
                 </SheetHeader>
 
                 <div className="settings-body">
+                  <section
+                    className="settings-section"
+                    aria-labelledby="preference-heading"
+                  >
+                    <div className="settings-section-title">
+                      <GlassWater aria-hidden="true" />
+                      <div>
+                        <h2 id="preference-heading">饮水习惯</h2>
+                        <p>设置每日目标与常用杯量</p>
+                      </div>
+                    </div>
+                    <form
+                      className="preference-form"
+                      onSubmit={savePreferences}
+                    >
+                      <label htmlFor="daily-goal">每日目标</label>
+                      <div className="settings-input-wrap">
+                        <Input
+                          id="daily-goal"
+                          type="number"
+                          min="250"
+                          max="10000"
+                          step="50"
+                          inputMode="numeric"
+                          value={goalDraft}
+                          onChange={(event) =>
+                            setGoalDraft(event.target.value)
+                          }
+                          className="settings-number-input"
+                        />
+                        <span>ml</span>
+                      </div>
+
+                      <span className="preference-label">快捷容量</span>
+                      <div className="quick-settings-grid">
+                        {quickAmountDrafts.map((value, index) => (
+                          <div
+                            className="settings-input-wrap"
+                            key={`quick-${index}`}
+                          >
+                            <Input
+                              aria-label={`第 ${index + 1} 个快捷容量`}
+                              type="number"
+                              min="1"
+                              max="5000"
+                              step="1"
+                              inputMode="numeric"
+                              value={value}
+                              onChange={(event) =>
+                                setQuickAmountDrafts((current) =>
+                                  current.map((item, itemIndex) =>
+                                    itemIndex === index
+                                      ? event.target.value
+                                      : item,
+                                  ),
+                                )
+                              }
+                              className="settings-number-input"
+                            />
+                            <span>ml</span>
+                          </div>
+                        ))}
+                      </div>
+                      <Button type="submit" className="save-preferences">
+                        保存设置
+                      </Button>
+                    </form>
+                  </section>
+
                   <section
                     className="settings-section"
                     aria-labelledby="theme-heading"
@@ -503,43 +828,77 @@ export default function Home() {
                 <p className="section-kicker">今日饮水</p>
                 <h2 id="today-heading">今天喝了多少水？</h2>
               </div>
-              <span className="percentage">{progress}%</span>
             </div>
 
             <div className="progress-zone">
               <div
-                className="progress-gauge"
-                style={gaugeStyle}
-                role="img"
-                aria-label={`今日已饮水 ${todayTotal} 毫升，目标 ${store.dailyGoalMl} 毫升，完成 ${progress}%`}
+                className={`glass-stage${progress >= 100 ? " is-full" : ""}`}
               >
-                <div className="gauge-inner">
-                  <span className="gauge-icon" aria-hidden="true">
+                <div
+                  key={pourVersion}
+                  className={`pour-animation${pourVersion ? " is-active" : ""}`}
+                  aria-hidden="true"
+                >
+                  <span className="pour-vessel">
                     <GlassWater />
                   </span>
-                  <strong>{todayTotal.toLocaleString("zh-CN")}</strong>
-                  <span>/ {store.dailyGoalMl.toLocaleString("zh-CN")} ml</span>
+                  <span className="pour-stream" />
                 </div>
+
+                <div
+                  className="hydration-glass"
+                  style={glassStyle}
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={store.dailyGoalMl}
+                  aria-valuenow={Math.min(todayTotal, store.dailyGoalMl)}
+                  aria-label={`今日已饮水 ${todayTotal} 毫升，目标 ${store.dailyGoalMl} 毫升，完成 ${progress}%`}
+                >
+                  <div className="glass-water" aria-hidden="true">
+                    <span className="water-surface" />
+                    <span className="water-bubble bubble-one" />
+                    <span className="water-bubble bubble-two" />
+                    <span className="water-bubble bubble-three" />
+                  </div>
+                  <span className="glass-shine" aria-hidden="true" />
+                  <div className="glass-scale" aria-hidden="true">
+                    {[1, 0.75, 0.5, 0.25].map((ratio) => (
+                      <span key={ratio}>
+                        <i />
+                        {Math.round(store.dailyGoalMl * ratio)}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="glass-reading">
+                    <strong>{todayTotal.toLocaleString("zh-CN")}</strong>
+                    <span>
+                      / {store.dailyGoalMl.toLocaleString("zh-CN")} ml
+                    </span>
+                  </div>
+                </div>
+
+                <span className="full-sparkle" aria-hidden="true">
+                  <Sparkles />
+                </span>
               </div>
 
               <div className="progress-copy">
                 <span className="sparkle-chip">
                   <Sparkles aria-hidden="true" />
-                  今日进度
+                  {progress}% · 今日进度
                 </span>
                 <strong>
-                  {remaining > 0 ? `还差 ${remaining} ml` : "今天喝够了"}
+                  {remaining > 0
+                    ? `还差 ${remaining} ml`
+                    : overGoal > 0
+                      ? `超出目标 ${overGoal} ml`
+                      : "今天喝够了"}
                 </strong>
                 <p>
                   {remaining > 0
                     ? "慢慢喝，每一杯都算数。"
                     : "做得很好，继续保持舒服的节奏。"}
                 </p>
-                <Progress
-                  value={progress}
-                  className="soft-progress"
-                  aria-label="今日饮水进度"
-                />
               </div>
             </div>
 
@@ -603,61 +962,8 @@ export default function Home() {
                 </div>
               </form>
             </div>
-          </section>
 
-          <aside className="side-stack">
-            <section className="panel history-panel" aria-labelledby="log-heading">
-              <div className="panel-heading">
-                <div>
-                  <p className="section-kicker">今日明细</p>
-                  <h2 id="log-heading">喝水记录</h2>
-                </div>
-                <span className="entry-count">{todayEntries.length} 杯</span>
-              </div>
-
-              <div className="history-list" aria-live="polite">
-                {todayEntries.length ? (
-                  todayEntries.map((entry) => (
-                    <article className="history-row" key={entry.id}>
-                      <span className="history-icon" aria-hidden="true">
-                        <Droplets />
-                      </span>
-                      <div className="history-copy">
-                        <strong>{entry.amountMl} ml</strong>
-                        <span>
-                          <Clock3 aria-hidden="true" />
-                          {new Intl.DateTimeFormat("zh-CN", {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                            hour12: false,
-                          }).format(new Date(entry.drankAt))}
-                        </span>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="delete-button"
-                        aria-label={`删除 ${entry.amountMl} 毫升记录`}
-                        onClick={() => deleteEntry(entry)}
-                      >
-                        <Trash2 />
-                      </Button>
-                    </article>
-                  ))
-                ) : (
-                  <div className="empty-state">
-                    <span aria-hidden="true">
-                      <GlassWater />
-                    </span>
-                    <strong>今天的杯子还空着</strong>
-                    <p>从左边选一杯，第一条记录就会出现在这里。</p>
-                  </div>
-                )}
-              </div>
-            </section>
-
-            <section className="panel week-panel" aria-labelledby="week-heading">
+            <section className="inline-week" aria-labelledby="week-heading">
               <div className="panel-heading compact">
                 <div>
                   <p className="section-kicker">最近七天</p>
@@ -692,6 +998,170 @@ export default function Home() {
                 })}
               </div>
             </section>
+          </section>
+
+          <aside className="side-stack">
+            <section
+              className="panel calendar-panel"
+              aria-labelledby="calendar-heading"
+            >
+              <div className="calendar-heading">
+                <div>
+                  <p className="section-kicker">月度日历</p>
+                  <h2 id="calendar-heading">{monthLabel}</h2>
+                </div>
+                <div className="calendar-nav">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="上个月"
+                    onClick={() => changeMonth(-1)}
+                  >
+                    <ChevronLeft />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="下个月"
+                    onClick={() => changeMonth(1)}
+                  >
+                    <ChevronRight />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="calendar-weekdays" aria-hidden="true">
+                {['一', '二', '三', '四', '五', '六', '日'].map((day) => (
+                  <span key={day}>{day}</span>
+                ))}
+              </div>
+              <div className="calendar-grid">
+                {monthDays.map((day) => {
+                  const ratio = Math.min(
+                    100,
+                    Math.round((day.totalMl / store.dailyGoalMl) * 100),
+                  );
+                  const className = [
+                    "calendar-day",
+                    day.isCurrentMonth ? "" : "is-outside",
+                    day.key === selectedDayKey ? "is-selected" : "",
+                    day.key === todayKey ? "is-today" : "",
+                    day.totalMl >= store.dailyGoalMl ? "is-complete" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  const dayStyle = {
+                    "--day-fill": `${ratio}%`,
+                  } as CSSProperties;
+
+                  return (
+                    <button
+                      type="button"
+                      className={className}
+                      style={dayStyle}
+                      key={day.key}
+                      aria-label={`${day.key}，饮水 ${day.totalMl} 毫升`}
+                      aria-pressed={day.key === selectedDayKey}
+                      onClick={() => selectCalendarDay(day)}
+                    >
+                      <span>{day.dayNumber}</span>
+                      <small>
+                        {day.totalMl
+                          ? day.totalMl >= 1000
+                            ? `${(day.totalMl / 1000).toFixed(1)}L`
+                            : day.totalMl
+                          : ""}
+                      </small>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="calendar-legend">
+                <span><i className="legend-water" />有记录</span>
+                <span><i className="legend-complete" />已达标</span>
+              </div>
+            </section>
+
+            <section className="panel history-panel" aria-labelledby="log-heading">
+              <div className="panel-heading">
+                <div>
+                  <p className="section-kicker">{selectedDateLabel}</p>
+                  <h2 id="log-heading">喝水记录</h2>
+                </div>
+                <div className="history-heading-actions">
+                  <span className="entry-count">{selectedEntries.length} 杯</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="add-entry-button"
+                    onClick={openAddEntry}
+                  >
+                    <Plus />
+                    补记
+                  </Button>
+                </div>
+              </div>
+
+              <div className="history-list" aria-live="polite">
+                {selectedEntries.length ? (
+                  selectedEntries.map((entry) => (
+                    <article className="history-row" key={entry.id}>
+                      <span className="history-icon" aria-hidden="true">
+                        <Droplets />
+                      </span>
+                      <div className="history-copy">
+                        <strong>{entry.amountMl} ml</strong>
+                        <span>
+                          <Clock3 aria-hidden="true" />
+                          {new Intl.DateTimeFormat("zh-CN", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            hour12: false,
+                          }).format(new Date(entry.drankAt))}
+                        </span>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="edit-button"
+                        aria-label={`编辑 ${entry.amountMl} 毫升记录`}
+                        onClick={() => openEditEntry(entry)}
+                      >
+                        <Pencil />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="delete-button"
+                        aria-label={`删除 ${entry.amountMl} 毫升记录`}
+                        onClick={() => deleteEntry(entry)}
+                      >
+                        <Trash2 />
+                      </Button>
+                    </article>
+                  ))
+                ) : (
+                  <div className="empty-state">
+                    <span aria-hidden="true">
+                      <GlassWater />
+                    </span>
+                    <strong>
+                      {selectedDayKey === todayKey
+                        ? "今天的杯子还空着"
+                        : "这一天没有饮水记录"}
+                    </strong>
+                    <p>
+                      点击“补记”，可以补上这一天喝过的水。
+                    </p>
+                  </div>
+                )}
+              </div>
+            </section>
           </aside>
         </div>
 
@@ -700,6 +1170,72 @@ export default function Home() {
           记录保存在当前设备，已为未来同步留好位置
         </footer>
       </div>
+
+      <Dialog
+        open={isEntryDialogOpen}
+        onOpenChange={setIsEntryDialogOpen}
+      >
+        <DialogContent
+          className="entry-dialog"
+          data-theme={store.theme}
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {editingEntryId ? "编辑饮水记录" : "补记饮水"}
+            </DialogTitle>
+            <DialogDescription>
+              填写精确水量和饮水时间，保存后会立即更新统计。
+            </DialogDescription>
+          </DialogHeader>
+          <form className="entry-form" onSubmit={saveEntry}>
+            <label htmlFor="entry-amount">饮水量</label>
+            <div className="dialog-input-wrap">
+              <Input
+                id="entry-amount"
+                type="number"
+                min="1"
+                max="5000"
+                step="1"
+                inputMode="numeric"
+                value={entryAmountDraft}
+                onChange={(event) =>
+                  setEntryAmountDraft(event.target.value)
+                }
+                placeholder="输入毫升数"
+                autoFocus
+              />
+              <span>ml</span>
+            </div>
+
+            <label htmlFor="entry-time">饮水时间</label>
+            <Input
+              id="entry-time"
+              type="datetime-local"
+              max={now ? dateTimeInputValue(now) : undefined}
+              value={entryTimeDraft}
+              onChange={(event) => setEntryTimeDraft(event.target.value)}
+              className="dialog-time-input"
+            />
+
+            <DialogFooter className="entry-dialog-footer">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setIsEntryDialogOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                type="submit"
+                className="dialog-save-button"
+                disabled={!entryAmountDraft || !entryTimeDraft}
+              >
+                {editingEntryId ? "保存修改" : "记下这杯"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Toaster position="top-center" theme="light" closeButton />
     </main>

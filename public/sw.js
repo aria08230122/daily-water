@@ -1,4 +1,4 @@
-const CACHE_NAME = "daily-water-shell-v5";
+const CACHE_NAME = "daily-water-shell-v6";
 
 function scopedUrl(path) {
   return new URL(path, self.registration.scope).href;

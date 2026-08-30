@@ -487,7 +487,7 @@ label {
   width: min(92vw, 420px);
   max-width: none;
   gap: 0;
-  overflow-y: auto;
+  overflow: hidden;
   border-color: var(--line);
   background:
     radial-gradient(circle at 100% 0%, var(--accent-wash), transparent 18rem),
@@ -711,6 +711,7 @@ label {
 }
 
 .settings-header[data-slot="sheet-header"] {
+  flex-shrink: 0;
   gap: 5px;
   padding: 28px 62px 22px 24px;
   border-bottom: 1px solid var(--line);
@@ -729,7 +730,12 @@ label {
 
 .settings-body {
   display: grid;
+  flex: 1;
+  min-height: 0;
+  align-content: start;
   gap: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px 18px calc(24px + env(safe-area-inset-bottom));
 }
 
@@ -903,21 +909,79 @@ label {
   pointer-events: none;
 }
 
-.quick-settings-grid {
+.quick-settings-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px;
+  gap: 9px;
 }
 
-.quick-settings-grid .settings-number-input[data-slot="input"] {
-  padding-right: 30px;
-  padding-left: 9px;
-  font-size: 0.75rem;
+.quick-settings-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 8px;
 }
 
-.quick-settings-grid .settings-input-wrap > span {
-  right: 8px;
-  font-size: 0.55rem;
+.quick-settings-row > label {
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  font-weight: 680;
+}
+
+.quick-settings-row .settings-number-input[data-slot="input"] {
+  min-width: 0;
+  font-size: 1rem;
+}
+
+#quick-amounts-heading {
+  scroll-margin-top: 20px;
+}
+
+.quick-settings-help {
+  margin: 0 0 4px;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  line-height: 1.65;
+}
+
+.remove-quick-button[data-slot="button"] {
+  width: 38px;
+  height: 43px;
+  border-radius: 12px;
+  color: var(--ink-soft);
+}
+
+.remove-quick-button[data-slot="button"]:hover,
+.reset-quick-button[data-slot="button"]:hover {
+  background: var(--accent-wash);
+  color: var(--accent-deep);
+}
+
+.quick-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.add-quick-button[data-slot="button"],
+.reset-quick-button[data-slot="button"] {
+  height: 40px;
+  border-radius: 12px;
+  color: var(--accent-deep);
+  font-size: 0.7rem;
+}
+
+.add-quick-button[data-slot="button"] {
+  border-color: var(--line);
+  background: var(--surface-solid);
+}
+
+.quick-settings-error {
+  margin: 0;
+  color: #a73f4f;
+  font-size: 0.7rem;
+  line-height: 1.6;
 }
 
 .save-preferences[data-slot="button"] {
@@ -1491,13 +1555,35 @@ label {
 
 .quick-label-row {
   display: flex;
+  flex-wrap: wrap;
   min-height: 30px;
   align-items: center;
   justify-content: space-between;
+  gap: 4px 8px;
   margin-bottom: 10px;
   color: var(--ink-soft);
   font-size: 0.76rem;
   font-weight: 700;
+}
+
+.quick-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+
+.quick-edit-button[data-slot="button"] {
+  height: 36px;
+  padding: 0 7px;
+  border-radius: 11px;
+  color: var(--accent-deep);
+  font-size: 0.7rem;
+}
+
+.quick-edit-button[data-slot="button"]:hover {
+  background: var(--accent-wash);
+  color: var(--accent-deep);
 }
 
 .undo-button[data-slot="button"] {
@@ -1520,6 +1606,7 @@ label {
 }
 
 .quick-button[data-slot="button"] {
+  min-width: 0;
   height: 57px;
   gap: 4px;
   padding: 0 12px;
@@ -2214,6 +2301,10 @@ label {
   .quick-button[data-slot="button"] {
     height: 54px;
     padding: 0 7px;
+  }
+
+  .quick-button strong {
+    font-size: clamp(0.78rem, 3.6vw, 0.96rem);
   }
 
   .custom-control {

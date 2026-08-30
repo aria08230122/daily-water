@@ -13,6 +13,7 @@ import {
   Palette,
   Pencil,
   Plus,
+  RotateCcw,
   Settings2,
   Smartphone,
   Sparkles,
@@ -46,6 +47,13 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { Toaster } from "@/components/ui/sonner";
+import {
+  DEFAULT_QUICK_AMOUNTS_ML,
+  MAX_QUICK_AMOUNTS,
+  MAX_QUICK_AMOUNT_ML,
+  normalizeQuickAmounts,
+  validateQuickAmountDrafts,
+} from "@/lib/quick-amounts";
 
 type ThemeId = "cream" | "blue" | "sage" | "berry" | "custom";
 
@@ -91,7 +99,7 @@ const DEFAULT_STORE: WaterStore = {
   theme: "cream",
   customColor: "#89A7A2",
   dailyGoalMl: 2000,
-  quickAmountsMl: [250, 350, 500],
+  quickAmountsMl: [...DEFAULT_QUICK_AMOUNTS_ML],
   entries: [],
 };
 
@@ -120,16 +128,6 @@ function normalizeWaterStore(value: unknown): WaterStore | null {
       !Number.isNaN(Date.parse(entry.drankAt)),
   );
 
-  const quickAmounts = Array.isArray(parsed.quickAmountsMl)
-    ? parsed.quickAmountsMl.filter(
-        (amount): amount is number =>
-          typeof amount === "number" &&
-          Number.isFinite(amount) &&
-          amount > 0 &&
-          amount <= 5000,
-      )
-    : [];
-
   return {
     version: 1,
     theme: isThemeId(parsed.theme) ? parsed.theme : DEFAULT_STORE.theme,
@@ -142,9 +140,7 @@ function normalizeWaterStore(value: unknown): WaterStore | null {
       parsed.dailyGoalMl > 0
         ? parsed.dailyGoalMl
         : DEFAULT_STORE.dailyGoalMl,
-    quickAmountsMl: quickAmounts.length
-      ? quickAmounts
-      : DEFAULT_STORE.quickAmountsMl,
+    quickAmountsMl: normalizeQuickAmounts(parsed.quickAmountsMl),
     entries,
   };
 }
@@ -269,11 +265,10 @@ export default function Home() {
   const [isReady, setIsReady] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [goalDraft, setGoalDraft] = useState("2000");
-  const [quickAmountDrafts, setQuickAmountDrafts] = useState([
-    "250",
-    "350",
-    "500",
-  ]);
+  const [quickAmountDrafts, setQuickAmountDrafts] = useState<string[]>(
+    DEFAULT_QUICK_AMOUNTS_ML.map(String),
+  );
+  const [quickAmountError, setQuickAmountError] = useState("");
   const [customColorDraft, setCustomColorDraft] = useState(
     DEFAULT_STORE.customColor,
   );
@@ -287,6 +282,17 @@ export default function Home() {
     useState<InstallPromptEvent | null>(null);
   const [isStandalone, setIsStandalone] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const quickSettingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const quickSettingsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const settingsOpenedFromQuickRef = useRef(false);
+  const pendingQuickFocusRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const index = pendingQuickFocusRef.current;
+    if (index === null) return;
+    document.getElementById(`quick-amount-${index}`)?.focus();
+    pendingQuickFocusRef.current = null;
+  }, [quickAmountDrafts]);
 
   useEffect(() => {
     const currentDate = new Date();
@@ -449,45 +455,66 @@ export default function Home() {
     if (open) {
       setGoalDraft(String(store.dailyGoalMl));
       setCustomColorDraft(store.customColor);
-      setQuickAmountDrafts(
-        Array.from({ length: 3 }, (_, index) =>
-          String(
-            store.quickAmountsMl[index] ??
-              DEFAULT_STORE.quickAmountsMl[index],
-          ),
-        ),
-      );
+      setQuickAmountDrafts(store.quickAmountsMl.map(String));
+      setQuickAmountError("");
     }
     setIsSettingsOpen(open);
   }
 
-  function savePreferences(event: FormEvent<HTMLFormElement>) {
+  function saveDailyGoal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const goal = Math.round(Number(goalDraft));
-    const quickAmounts = quickAmountDrafts.map((value) =>
-      Math.round(Number(value)),
-    );
 
     if (!Number.isFinite(goal) || goal < 250 || goal > 10000) {
       toast.error("每日目标请输入 250–10000 ml");
       return;
     }
-    if (
-      quickAmounts.some(
-        (amount) =>
-          !Number.isFinite(amount) || amount < 1 || amount > 5000,
-      )
-    ) {
-      toast.error("快捷容量请输入 1–5000 ml");
-      return;
-    }
-
     setStore((current) => ({
       ...current,
       dailyGoalMl: goal,
-      quickAmountsMl: quickAmounts,
     }));
-    toast.success("饮水目标与快捷容量已保存");
+    toast.success("每日饮水目标已保存");
+  }
+
+  function openQuickAmountSettings() {
+    settingsOpenedFromQuickRef.current = true;
+    handleSettingsOpenChange(true);
+  }
+
+  function addQuickAmountDraft() {
+    if (quickAmountDrafts.length >= MAX_QUICK_AMOUNTS) return;
+    pendingQuickFocusRef.current = quickAmountDrafts.length;
+    setQuickAmountDrafts((current) => [...current, ""]);
+    setQuickAmountError("");
+  }
+
+  function removeQuickAmountDraft(index: number) {
+    if (quickAmountDrafts.length <= 1) return;
+    pendingQuickFocusRef.current = Math.min(index, quickAmountDrafts.length - 2);
+    setQuickAmountDrafts((current) =>
+      current.filter((_, itemIndex) => itemIndex !== index),
+    );
+    setQuickAmountError("");
+  }
+
+  function resetQuickAmountDrafts() {
+    setQuickAmountDrafts(DEFAULT_QUICK_AMOUNTS_ML.map(String));
+    setQuickAmountError("");
+  }
+
+  function saveQuickAmounts(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const result = validateQuickAmountDrafts(quickAmountDrafts);
+    if (!result.ok) {
+      setQuickAmountError(result.message);
+      return;
+    }
+
+    setStore((current) => ({ ...current, quickAmountsMl: result.amounts }));
+    setQuickAmountDrafts(result.amounts.map(String));
+    setQuickAmountError("");
+    if (settingsOpenedFromQuickRef.current) setIsSettingsOpen(false);
+    toast.success("快捷杯量已保存，首页按钮已更新");
   }
 
   function applyCustomTheme(event: FormEvent<HTMLFormElement>) {
@@ -764,6 +791,9 @@ export default function Home() {
                   className="settings-trigger"
                   aria-label="打开设置"
                   title="设置"
+                  onClick={() => {
+                    settingsOpenedFromQuickRef.current = false;
+                  }}
                 >
                   <Settings2 aria-hidden="true" />
                 </Button>
@@ -773,6 +803,26 @@ export default function Home() {
                 className="settings-sheet"
                 data-theme={store.theme}
                 style={customThemeStyle}
+                onOpenAutoFocus={(event) => {
+                  if (!settingsOpenedFromQuickRef.current) return;
+                  event.preventDefault();
+                  const heading = quickSettingsHeadingRef.current;
+                  const settingsBody =
+                    heading?.closest<HTMLElement>(".settings-body");
+                  heading?.focus({ preventScroll: true });
+                  if (heading && settingsBody) {
+                    settingsBody.scrollTop +=
+                      heading.getBoundingClientRect().top -
+                      settingsBody.getBoundingClientRect().top -
+                      20;
+                  }
+                }}
+                onCloseAutoFocus={(event) => {
+                  if (!settingsOpenedFromQuickRef.current) return;
+                  event.preventDefault();
+                  quickSettingsTriggerRef.current?.focus({ preventScroll: true });
+                  settingsOpenedFromQuickRef.current = false;
+                }}
               >
                 <SheetHeader className="settings-header">
                   <SheetTitle>设置</SheetTitle>
@@ -790,13 +840,10 @@ export default function Home() {
                       <GlassWater aria-hidden="true" />
                       <div>
                         <h2 id="preference-heading">饮水习惯</h2>
-                        <p>设置每日目标与常用杯量</p>
+                        <p>按自己的节奏设置每日目标</p>
                       </div>
                     </div>
-                    <form
-                      className="preference-form"
-                      onSubmit={savePreferences}
-                    >
+                    <form className="preference-form" onSubmit={saveDailyGoal}>
                       <label htmlFor="daily-goal">每日目标</label>
                       <div className="settings-input-wrap">
                         <Input
@@ -807,46 +854,139 @@ export default function Home() {
                           step="50"
                           inputMode="numeric"
                           value={goalDraft}
-                          onChange={(event) =>
-                            setGoalDraft(event.target.value)
-                          }
+                          onChange={(event) => setGoalDraft(event.target.value)}
                           className="settings-number-input"
                         />
                         <span>ml</span>
                       </div>
 
-                      <span className="preference-label">快捷容量</span>
-                      <div className="quick-settings-grid">
+                      <Button type="submit" className="save-preferences">
+                        保存目标
+                      </Button>
+                    </form>
+                  </section>
+
+                  <section
+                    className="settings-section quick-settings-section"
+                    aria-labelledby="quick-amounts-heading"
+                  >
+                    <div className="settings-section-title">
+                      <GlassWater aria-hidden="true" />
+                      <div>
+                        <h2
+                          id="quick-amounts-heading"
+                          ref={quickSettingsHeadingRef}
+                          tabIndex={-1}
+                        >
+                          自定义快捷杯量
+                        </h2>
+                        <p>把首页按钮换成你常用水杯的容量</p>
+                      </div>
+                    </div>
+                    <form
+                      className="preference-form"
+                      onSubmit={saveQuickAmounts}
+                      noValidate
+                    >
+                      <p className="quick-settings-help" id="quick-amount-help">
+                        可保留 1–{MAX_QUICK_AMOUNTS} 个杯量，每个 1–5000
+                        ml。修改后点保存，历史记录不会改变。
+                      </p>
+                      <div className="quick-settings-list">
                         {quickAmountDrafts.map((value, index) => (
                           <div
-                            className="settings-input-wrap"
+                            className="quick-settings-row"
                             key={`quick-${index}`}
                           >
-                            <Input
-                              aria-label={`第 ${index + 1} 个快捷容量`}
-                              type="number"
-                              min="1"
-                              max="5000"
-                              step="1"
-                              inputMode="numeric"
-                              value={value}
-                              onChange={(event) =>
-                                setQuickAmountDrafts((current) =>
-                                  current.map((item, itemIndex) =>
-                                    itemIndex === index
-                                      ? event.target.value
-                                      : item,
-                                  ),
-                                )
+                            <label htmlFor={`quick-amount-${index}`}>
+                              杯量 {index + 1}
+                            </label>
+                            <div className="settings-input-wrap">
+                              <Input
+                                id={`quick-amount-${index}`}
+                                aria-label={`第 ${index + 1} 个快捷杯量`}
+                                aria-describedby={
+                                  quickAmountError
+                                    ? "quick-amount-help quick-amount-error"
+                                    : "quick-amount-help"
+                                }
+                                aria-invalid={Boolean(quickAmountError)}
+                                type="number"
+                                min="1"
+                                max={MAX_QUICK_AMOUNT_ML}
+                                step="1"
+                                inputMode="numeric"
+                                value={value}
+                                placeholder="输入容量"
+                                onChange={(event) => {
+                                  setQuickAmountDrafts((current) =>
+                                    current.map((item, itemIndex) =>
+                                      itemIndex === index
+                                        ? event.target.value
+                                        : item,
+                                    ),
+                                  );
+                                  setQuickAmountError("");
+                                }}
+                                className="settings-number-input"
+                              />
+                              <span>ml</span>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="remove-quick-button"
+                              aria-label={`删除第 ${index + 1} 个快捷杯量`}
+                              title={
+                                quickAmountDrafts.length === 1
+                                  ? "至少保留一个杯量"
+                                  : "删除这个杯量"
                               }
-                              className="settings-number-input"
-                            />
-                            <span>ml</span>
+                              disabled={quickAmountDrafts.length === 1}
+                              onClick={() => removeQuickAmountDraft(index)}
+                            >
+                              <Trash2 aria-hidden="true" />
+                            </Button>
                           </div>
                         ))}
                       </div>
+                      <div className="quick-settings-actions">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="add-quick-button"
+                          onClick={addQuickAmountDraft}
+                          disabled={
+                            quickAmountDrafts.length >= MAX_QUICK_AMOUNTS
+                          }
+                        >
+                          <Plus aria-hidden="true" />
+                          添加杯量
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="reset-quick-button"
+                          onClick={resetQuickAmountDrafts}
+                        >
+                          <RotateCcw aria-hidden="true" />
+                          恢复默认
+                        </Button>
+                      </div>
+                      {quickAmountError ? (
+                        <p
+                          id="quick-amount-error"
+                          role="alert"
+                          className="quick-settings-error"
+                        >
+                          {quickAmountError}
+                        </p>
+                      ) : null}
                       <Button type="submit" className="save-preferences">
-                        保存设置
+                        保存杯量
                       </Button>
                     </form>
                   </section>
@@ -1006,7 +1146,7 @@ export default function Home() {
                       />
                     </div>
                     <p className="import-note">
-                      导入后会替换当前浏览器中的记录与配色设置。
+                      备份包含饮水记录、目标、快捷杯量与配色，导入后会替换本机对应数据。
                     </p>
                   </section>
                 </div>
@@ -1071,20 +1211,40 @@ export default function Home() {
             <div className="quick-area">
               <div className="quick-label-row">
                 <span>选一杯，轻轻点一下</span>
-                {lastAddedId ? (
+                <div className="quick-label-actions">
                   <Button
+                    ref={quickSettingsTriggerRef}
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="undo-button"
-                    onClick={undoLast}
+                    className="quick-edit-button"
+                    aria-label="自定义杯量"
+                    aria-haspopup="dialog"
+                    onClick={openQuickAmountSettings}
                   >
-                    <Undo2 />
-                    撤销
+                    <Pencil aria-hidden="true" />
+                    自定义杯量
                   </Button>
-                ) : null}
+                  {lastAddedId ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="undo-button"
+                      onClick={undoLast}
+                    >
+                      <Undo2 aria-hidden="true" />
+                      撤销
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-              <div className="quick-grid">
+              <div
+                className="quick-grid"
+                style={{
+                  gridTemplateColumns: `repeat(${Math.min(store.quickAmountsMl.length, 3)}, minmax(0, 1fr))`,
+                }}
+              >
                 {store.quickAmountsMl.map((amount) => (
                   <Button
                     key={amount}

@@ -1,4 +1,4 @@
-const CACHE_NAME = "daily-water-shell-v6";
+const CACHE_NAME = "daily-water-shell-v7";
 
 function scopedUrl(path) {
   return new URL(path, self.registration.scope).href;
@@ -57,7 +57,7 @@ self.addEventListener("activate", (event) => {
       .then((names) =>
         Promise.all(
           names
-            .filter((name) => name !== CACHE_NAME)
+            .filter((name) => name.startsWith("daily-water-shell-") && name !== CACHE_NAME)
             .map((name) => caches.delete(name)),
         ),
       )
@@ -68,7 +68,7 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== "GET" || url.origin !== self.location.origin) return;
+  if (request.method !== "GET" || url.origin !== self.location.origin || !url.href.startsWith(self.registration.scope)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(

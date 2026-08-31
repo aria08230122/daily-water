@@ -17,6 +17,8 @@ import {
   Settings2,
   Smartphone,
   Sparkles,
+  Timer,
+  Toilet,
   Trash2,
   Undo2,
   Upload,
@@ -51,26 +53,17 @@ import {
   DEFAULT_QUICK_AMOUNTS_ML,
   MAX_QUICK_AMOUNTS,
   MAX_QUICK_AMOUNT_ML,
-  normalizeQuickAmounts,
   validateQuickAmountDrafts,
 } from "@/lib/quick-amounts";
-
-type ThemeId = "cream" | "blue" | "sage" | "berry" | "custom";
-
-type WaterEntry = {
-  id: string;
-  amountMl: number;
-  drankAt: string;
-};
-
-type WaterStore = {
-  version: 1;
-  theme: ThemeId;
-  customColor: string;
-  dailyGoalMl: number;
-  quickAmountsMl: number[];
-  entries: WaterEntry[];
-};
+import {
+  DEFAULT_STORE, STORAGE_KEY, THEMES, isHexColor, isThemeId, normalizeWaterStore,
+  type ThemeId, type WaterEntry, type WaterStore,
+} from "@/lib/water-store";
+import { readBowelStore } from "@/lib/bowel-store";
+import { createLifeBackup, parseLifeBackup, type LifeImport } from "@/lib/life-backup";
+import { useBowelStore } from "@/hooks/use-bowel-store";
+import { BowelPage } from "@/components/bowel-page";
+import "@/bowel.css";
 
 type DaySummary = {
   key: string;
@@ -85,65 +78,6 @@ type CalendarDay = {
   isCurrentMonth: boolean;
   totalMl: number;
 };
-
-const THEMES: Array<{ id: ThemeId; name: string }> = [
-  { id: "cream", name: "奶油杏" },
-  { id: "blue", name: "雾霾蓝" },
-  { id: "sage", name: "鼠尾草" },
-  { id: "berry", name: "豆沙莓" },
-];
-
-const STORAGE_KEY = "daily-water/store-v1";
-const DEFAULT_STORE: WaterStore = {
-  version: 1,
-  theme: "cream",
-  customColor: "#89A7A2",
-  dailyGoalMl: 2000,
-  quickAmountsMl: [...DEFAULT_QUICK_AMOUNTS_ML],
-  entries: [],
-};
-
-function isThemeId(value: unknown): value is ThemeId {
-  return value === "custom" || THEMES.some((theme) => theme.id === value);
-}
-
-function isHexColor(value: unknown): value is string {
-  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
-}
-
-function normalizeWaterStore(value: unknown): WaterStore | null {
-  if (!value || typeof value !== "object") return null;
-
-  const parsed = value as Partial<WaterStore>;
-  if (parsed.version !== 1 || !Array.isArray(parsed.entries)) return null;
-
-  const entries = parsed.entries.filter(
-    (entry): entry is WaterEntry =>
-      typeof entry?.id === "string" &&
-      typeof entry?.amountMl === "number" &&
-      Number.isFinite(entry.amountMl) &&
-      entry.amountMl > 0 &&
-      entry.amountMl <= 5000 &&
-      typeof entry?.drankAt === "string" &&
-      !Number.isNaN(Date.parse(entry.drankAt)),
-  );
-
-  return {
-    version: 1,
-    theme: isThemeId(parsed.theme) ? parsed.theme : DEFAULT_STORE.theme,
-    customColor: isHexColor(parsed.customColor)
-      ? parsed.customColor.toUpperCase()
-      : DEFAULT_STORE.customColor,
-    dailyGoalMl:
-      typeof parsed.dailyGoalMl === "number" &&
-      Number.isFinite(parsed.dailyGoalMl) &&
-      parsed.dailyGoalMl > 0
-        ? parsed.dailyGoalMl
-        : DEFAULT_STORE.dailyGoalMl,
-    quickAmountsMl: normalizeQuickAmounts(parsed.quickAmountsMl),
-    entries,
-  };
-}
 
 // Persistence stays behind a small adapter so a cloud sync repository can be
 // added later without rewriting the page or the data model.
@@ -258,6 +192,11 @@ type InstallPromptEvent = Event & {
 };
 
 export default function Home() {
+  const bowel = useBowelStore();
+  const [activePage, setActivePage] = useState<"water" | "bowel">(
+    () => typeof window !== "undefined" && window.location.hash === "#bowel" ? "bowel" : "water",
+  );
+  const [pendingImport, setPendingImport] = useState<LifeImport | null>(null);
   const [store, setStore] = useState<WaterStore>(DEFAULT_STORE);
   const [customAmount, setCustomAmount] = useState("");
   const [lastAddedId, setLastAddedId] = useState<string | null>(null);
@@ -288,6 +227,19 @@ export default function Home() {
   const pendingQuickFocusRef = useRef<number | null>(null);
 
   useEffect(() => {
+    const onNavigate = () => {
+      setActivePage(window.location.hash === "#bowel" ? "bowel" : "water");
+      window.scrollTo({ top: 0 });
+    };
+    window.addEventListener("hashchange", onNavigate);
+    return () => window.removeEventListener("hashchange", onNavigate);
+  }, []);
+
+  useEffect(() => {
+    document.title = activePage === "bowel" ? "便便小记 · 生活记录" : "喝水小记 · 每日饮水记录";
+  }, [activePage]);
+
+  useEffect(() => {
     const index = pendingQuickFocusRef.current;
     if (index === null) return;
     document.getElementById(`quick-amount-${index}`)?.focus();
@@ -303,10 +255,25 @@ export default function Home() {
       new Date(currentDate.getFullYear(), currentDate.getMonth(), 1, 12),
     );
     setIsReady(true);
+    const updateDate = () => setNow(new Date());
+    const onVisible = () => { if (!document.hidden) updateDate(); };
+    const tick = window.setInterval(updateDate, 60_000);
+    window.addEventListener("focus", updateDate);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(tick);
+      window.removeEventListener("focus", updateDate);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   useEffect(() => {
-    if (isReady) localWaterRepository.save(store);
+    if (!isReady) return;
+    try {
+      localWaterRepository.save(store);
+    } catch {
+      toast.error("饮水数据未能写入本机，请先导出备份并检查浏览器存储空间。");
+    }
   }, [isReady, store]);
 
   useEffect(() => {
@@ -689,24 +656,27 @@ export default function Home() {
   }
 
   function exportData() {
-    const payload = {
-      app: "daily-water",
-      exportVersion: 1,
-      exportedAt: new Date().toISOString(),
-      data: store,
-    };
+    let bowelSnapshot;
+    try {
+      bowelSnapshot = readBowelStore(window.localStorage);
+    } catch {
+      toast.error("便便记录暂时无法读取，未导出不完整的备份。请先保留当前数据并重试。");
+      return;
+    }
+    const payload = createLifeBackup(store, bowelSnapshot, new Date().toISOString());
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `喝水小记-${localDayKey(new Date())}.json`;
+    link.download = `生活小记-${localDayKey(new Date())}.json`;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    toast.success(`已导出 ${store.entries.length} 条记录`);
+    toast.success(`已导出 ${store.entries.length} 条饮水、${bowelSnapshot.entries.length} 条便便记录`);
+    if (bowelSnapshot.activeSession) toast("正在计时的这次还未完成，请结束后再补一份备份。");
   }
 
   async function importData(event: ChangeEvent<HTMLInputElement>) {
@@ -721,22 +691,20 @@ export default function Home() {
 
     try {
       const parsed = JSON.parse(await file.text()) as unknown;
-      const candidate =
-        parsed &&
-        typeof parsed === "object" &&
-        "app" in parsed &&
-        (parsed as { app?: unknown }).app === "daily-water" &&
-        "data" in parsed
-          ? (parsed as { data: unknown }).data
-          : parsed;
-      const importedStore = normalizeWaterStore(candidate);
+      const candidate = parseLifeBackup(parsed);
+      setIsSettingsOpen(false);
+      setPendingImport(candidate);
+    } catch (reason) {
+      toast.error(reason instanceof Error && !(reason instanceof SyntaxError)
+        ? reason.message : "文件无法读取，请确认它是 JSON 备份文件");
+    }
+  }
 
-      if (!importedStore) {
-        toast.error("这不是有效的喝水小记备份文件");
-        return;
-      }
-
-      localWaterRepository.save(importedStore);
+  async function confirmImport() {
+    if (!pendingImport) return;
+    try {
+      await bowel.importSnapshot(pendingImport);
+      const importedStore = pendingImport.water;
       setStore(importedStore);
       setLastAddedId(null);
       setCustomAmount("");
@@ -746,10 +714,13 @@ export default function Home() {
       setCalendarCursor(
         new Date(currentDate.getFullYear(), currentDate.getMonth(), 1, 12),
       );
-      setIsSettingsOpen(false);
-      toast.success(`已导入 ${importedStore.entries.length} 条记录`);
-    } catch {
-      toast.error("文件无法读取，请确认它是 JSON 备份文件");
+      const summary = pendingImport.bowel
+        ? `${importedStore.entries.length} 条饮水、${pendingImport.bowel.entries.length} 条便便记录`
+        : `${importedStore.entries.length} 条饮水记录，便便记录保持不变`;
+      setPendingImport(null);
+      toast.success(`已导入 ${summary}`);
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : "导入失败，原记录未被修改。");
     }
   }
 
@@ -766,11 +737,11 @@ export default function Home() {
         <header className="app-header">
           <div className="brand-lockup">
             <span className="brand-mark" aria-hidden="true">
-              <Droplets />
+              {activePage === "water" ? <Droplets /> : <Toilet />}
             </span>
             <div>
-              <p className="eyebrow">Hydration diary</p>
-              <h1>喝水小记</h1>
+              <p className="eyebrow">{activePage === "water" ? "Hydration diary" : "Bowel diary"}</p>
+              <h1>{activePage === "water" ? "喝水小记" : "便便小记"}</h1>
             </div>
           </div>
           <div className="header-actions">
@@ -827,7 +798,7 @@ export default function Home() {
                 <SheetHeader className="settings-header">
                   <SheetTitle>设置</SheetTitle>
                   <SheetDescription>
-                    调整饮水习惯、页面配色与本地数据。
+                    调整饮水习惯、共同配色与生活记录备份。
                   </SheetDescription>
                 </SheetHeader>
 
@@ -1114,7 +1085,7 @@ export default function Home() {
                       <Download aria-hidden="true" />
                       <div>
                         <h2 id="data-heading">数据备份</h2>
-                        <p>当前共有 {store.entries.length} 条饮水记录</p>
+                        <p>饮水 {store.entries.length} 条 · 便便 {bowel.state.entries.length} 条</p>
                       </div>
                     </div>
                     <div className="data-actions">
@@ -1146,8 +1117,11 @@ export default function Home() {
                       />
                     </div>
                     <p className="import-note">
-                      备份包含饮水记录、目标、快捷杯量与配色，导入后会替换本机对应数据。
+                      备份包含饮水、已完成的便便记录、目标、快捷杯量与配色。导入前会确认替换范围；旧版饮水备份不会清除便便记录。
                     </p>
+                    {bowel.state.activeSession ? (
+                      <p className="import-note">正在计时的这次尚未完成，不包含在导出的备份中。</p>
+                    ) : null}
                   </section>
                 </div>
               </SheetContent>
@@ -1155,7 +1129,8 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="dashboard-grid">
+        {activePage === "water" ? (
+        <div className="dashboard-grid" id="water-page">
           <section className="primary-card" aria-labelledby="today-heading">
             <div className="section-heading">
               <div>
@@ -1491,11 +1466,48 @@ export default function Home() {
           </aside>
         </div>
 
+        ) : (
+          <BowelPage repository={bowel} theme={store.theme} customColor={store.customColor} />
+        )}
+
         <footer className="app-footer">
           <span className={isReady ? "status-dot ready" : "status-dot"} />
           记录保存在当前设备，已为未来同步留好位置
         </footer>
       </div>
+
+      <nav className="life-navigation" aria-label="生活记录页面">
+        <a href="#water" aria-current={activePage === "water" ? "page" : undefined}>
+          <Droplets aria-hidden="true" />
+          <span>喝水</span>
+        </a>
+        <a href="#bowel" aria-current={activePage === "bowel" ? "page" : undefined}>
+          <Toilet aria-hidden="true" />
+          <span>便便</span>
+          {bowel.state.activeSession ? <span className="nav-timer-status"><Timer aria-hidden="true" />计时中</span> : null}
+        </a>
+      </nav>
+
+      <Dialog open={Boolean(pendingImport)} onOpenChange={(open) => { if (!open && !bowel.busy) setPendingImport(null); }}>
+        <DialogContent className="entry-dialog" data-theme={store.theme} style={customThemeStyle}>
+          <DialogHeader>
+            <DialogTitle>确认导入备份？</DialogTitle>
+            <DialogDescription>
+              将用备份中的 {pendingImport?.water.entries.length ?? 0} 条饮水记录及相关设置，替换本机饮水数据。
+              {pendingImport?.bowel
+                ? `便便记录也会替换为备份中的 ${pendingImport.bowel.entries.length} 条。`
+                : "这是旧版饮水备份，已有的便便记录和计时会保留。"}
+              建议先导出当前数据，方便需要时恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="entry-dialog-footer">
+            <Button type="button" variant="ghost" disabled={bowel.busy} onClick={() => setPendingImport(null)}>取消</Button>
+            <Button type="button" className="dialog-save-button" disabled={bowel.busy} onClick={() => { void confirmImport(); }}>
+              {bowel.busy ? "正在导入…" : "确认导入"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={isEntryDialogOpen}

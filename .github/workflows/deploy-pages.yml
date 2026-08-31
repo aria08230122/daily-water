@@ -26,7 +26,7 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm install
-      - name: Test quick amounts
+      - name: Test records, timers and backups
         run: npm test
       - name: Build
         run: npm run build
